@@ -17,6 +17,7 @@ const fetchVideoInfo = require("youtube-info");
 
 const ConcatData = require("./ConcatData")
 const CombineData = require("./CombineData")
+const { emitToClient } = require("./clientUtils")
 
 const PREFIX = "?";
 
@@ -34,6 +35,38 @@ let isPlaying = false;
 let dispatcher = null;
 let voiceChannel = null;
 let textChannel = null;
+
+let serverSettings = {
+  socketStream: {
+    highWaterMark: 15360,
+    allowHalfOpen: true,
+    objectMode: false
+  },
+  decoder: {
+    returnDemuxed: false
+  },
+  opus: {
+    frameSize: 960,
+    channels: 2,
+    rate: 48000
+  },
+  audioStream: {
+    log: {
+      active: false,
+      formatsToLog: false
+    },
+    tryToWriteFile: false,
+    tryToReadFile: false,
+    tryToDecodeOpus: {
+      active: true,
+      playDecoded: false,
+      createConcatData: false,
+      sendAsStream: false,
+      sendAsFile: true
+    },
+    playAudioStream: true
+  }
+}
 
 client.on("ready", () => {
   console.log("HarmonyBot is Online!");
@@ -138,12 +171,40 @@ function handleMessage(message) {
       //Show current song metadata
       message.reply("¯\\_(ツ)_/¯ ");
       break;
+    case "-":
+    case "dev":
+      commandDev()
+      break
     default:
       console.log(command);
       message.reply(
         " command not recognized! Type '?help' or '??' for a list of commands."
       );
       break;
+  }
+}
+
+const modes = {
+  default: {
+
+  },
+
+}
+
+function commandDev(member, message) {
+  let args = msg
+    .split(" ")
+    .filter(arg => !actions.includes(arg))
+    .slice(1)
+  switch(args[0]){
+    case "modes":
+      break
+    case "mode":
+      break
+    case "restart":
+      break
+    default:
+      break
   }
 }
 
@@ -226,10 +287,18 @@ function playRequest(args, options) {
   }
 }
 
-function streamAudioToClient(stream, socket) {
-  let clientStream = ss.createStream({ highWaterMark: 15360, allowHalfOpen: true, objectMode: true })
+function streamAudioToClient(stream, socket, optionalData) {
+  let streamSettings = serverSettings.socketStream
+  let clientStream = ss.createStream({ 
+    highWaterMark: streamSettings.highWaterMark, 
+    allowHalfOpen: streamSettings.allowHalfOpen,
+    objectMode:  streamSettings.objectMode })
   console.log("Found client, sending stream over socket.io");
-  ss(socket).emit("track-stream", clientStream, 0)
+  let options = null
+  if(optionalData){
+    options = optionalData
+  }
+  ss(socket).emit("track-stream", clientStream, options)
   let ytdlDataChecked = 0
   stream.on("data", data => {
     if(ytdlDataChecked < 3){
@@ -248,7 +317,11 @@ function streamAudioToClient(stream, socket) {
 }
 
 function encodeOpus(input){
-  const encoder = new prism.opus.Encoder({ frameSize: 960, channels: 2, rate: 48000 })
+  let opusSettings = serverSettings.opus
+  const encoder = new prism.opus.Encoder({ 
+    frameSize: opusSettings.frameSize, 
+    channels: opusSettings.channels, 
+    rate: opusSettings.rate })
   let encoderDataChecked = 0
   encoder.on("progress", (length, downloaded, totalLength) => {
     console.log(`Encoder progress: ${length} => ${downloaded}/${totalLength}`)
@@ -262,10 +335,13 @@ function encodeOpus(input){
   })
 }
 
-async function decodeOpusFromWebm(input, willReturn = "decoded"){
-  console.log(`Using Opus module ${prism.opus.Encoder.type}`)
-  const opusDecoder = await new prism.opus.Decoder({frameSize: 160, channels: 2, rate: 48000})
-  const webmDemuxer = await new prism.opus.WebmDemuxer()
+async function decodeOpusFromWebm(input, returnDemuxed = false){
+  let opusSettings = serverSettings.opus
+  const opusDecoder = new prism.opus.Decoder({ 
+    frameSize: opusSettings.frameSize, 
+    channels: opusSettings.channels, 
+    rate: opusSettings.rate })
+  const webmDemuxer = new prism.opus.WebmDemuxer()
 
   let inputDataChecked = 0
   input.on("data", data => {
@@ -275,7 +351,7 @@ async function decodeOpusFromWebm(input, willReturn = "decoded"){
     }
   })
 
-  let demuxed = await input.pipe(webmDemuxer)
+  let demuxed = input.pipe(webmDemuxer)
   let demuxedDataChecked = 0
   demuxed.on("data", data => {
     if(demuxedDataChecked < 3){
@@ -283,11 +359,9 @@ async function decodeOpusFromWebm(input, willReturn = "decoded"){
       demuxedDataChecked++
     }
   })
-  if(willReturn === "demuxed"){
-    return demuxed
-  }
+  if(returnDemuxed){ return demuxed }
 
-  let decoded = await demuxed.pipe(opusDecoder)
+  let decoded = demuxed.pipe(opusDecoder)
   let opusDataChecked = 0
   decoded.once("progress", (len, prog, total) => {
     console.log(`Decoded ${len} => ${prog}/${total}`)
@@ -336,20 +410,15 @@ function playMusic(id, options) {
       });
       /* let audioStream = ytdl(youtubeUrl, youtubeOptions) */
 
-      const audioStreamLog = true
+      const audioStreamLog = serverSettings.audioStream.log.active
       if (audioStreamLog) {
+
         let streamLength = null;
-        audioStream.once(
-          "progress",
-          (length, downloaded, totalLength) => {
-            streamLength = totalLength;
-            if (clientSocket) {
-              console.log("Emitting total-length to client");
-              clientSocket.emit("total-length", totalLength);
-            }
-            console.log("progress totalLength: ", streamLength);
-          }
-        );
+        const { getStreamLength } = require("./streamLogs")
+        getStreamLength(audioStream, len => {
+          streamLength = len
+          emitToClient("total-length", len)
+        })
 
         audioStream.on("progress", (length, downloaded, totalLength) => {
           console.log(
@@ -357,50 +426,14 @@ function playMusic(id, options) {
           );
         });
 
-        const infoToLog = false
-        if(infoToLog){
-        audioStream.on("info", (info, format) => {
-          console.log("------");
-          console.log("Current format itag: ", format.itag);
-          console.log("Current format type: ", format.type);
-          console.log(
-            "Current format samplerate: ",
-            format["audio_sample_rate"]
-          );
-          console.log(
-            "Current format audioBitrate: ",
-            format.audioBitrate
-          );
-          console.log("------");
-          console.log(" ");
-          console.log("Available audio formats:");
-          let infoFormats = info.formats;
-          for (let format in infoFormats) {
-            if (!infoFormats[format].encoding) {
-              console.log("------");
-              console.log("Format itag: ", infoFormats[format].itag);
-              console.log("Format type: ", infoFormats[format].type);
-              console.log(
-                "Format samplerate: ",
-                infoFormats[format]["audio_sample_rate"]
-              );
-              console.log(
-                "Format audioBitrate: ",
-                infoFormats[format].audioBitrate
-              );
-              console.log("------");
-            }
-          }
-        })}
-        audioStream.on("error", err =>
-          console.log("Error in stream! ", err)
-        );
-        audioStream.on("end", () => {
-          console.log("audioStream ended!");
-        });
+        const formatsToLog = serverSettings.audioStream.log.formatsToLog
+        if(formatsToLog){
+          const {formatInfo} = require("./streamLogs")
+          formatInfo(audioStream)
+        }
       }
 
-      const tryToWriteFile = false;
+      const tryToWriteFile = serverSettings.audioStream.tryToWriteFile;
       if (tryToWriteFile) {
         console.log("Trying to save stream as saved_audio.opus");
         const writeStream = fs.createWriteStream("saved_audio.opus");
@@ -416,7 +449,7 @@ function playMusic(id, options) {
         );
       }
 
-      const tryToReadFile = false;
+      const tryToReadFile = serverSettings.audioStream.tryToReadFile;
       const sendToFFmpegDecoder = false;
       const pipeFFmpegToOpus = false;
       const sendToOpusDecoder = false;
@@ -458,17 +491,18 @@ function playMusic(id, options) {
       }
 
       //Try to decode through prism-media
-      const tryToDecodeOpus = false;
-      const playDecoded = true
+      const tryToDecodeOpus = serverSettings.audioStream.tryToDecodeOpus;
+      const playDecoded = serverSettings.audioStream.playDecoded
       if (tryToDecodeOpus) {
         //let decoded = false
-        let decoded = decodeOpusFromWebm(audioStream, "decoded")
+        let decoded = await decodeOpusFromWebm(audioStream, "decoded")
         /* try {
           decoded = await decodeOpusFromWebm(audioStream, "decoded")
         } catch(err) { console.log("Error on decoding opus: ", err) } */
 
         let newConcatData = false
-        if(decoded){
+        let createConcatData = false
+        if(decoded && createConcatData){
           try {
             newConcatData = new ConcatData(8)
             decoded.pipe(newConcatData)
@@ -495,12 +529,32 @@ function playMusic(id, options) {
           } catch(err) { console.log("Error sending concatData stream: ", err)}
         }
 
-        const sendAsCombined = true
+        const sendAsFile = true
+        if(sendAsFile && decoded){
+          try {
+          console.time("createWriteStream")
+          const writeStream = fs.createWriteStream("temp.opus");
+          decoded.pipe(writeStream)
+          writeStream.on("finish", () => {
+            console.timeEnd("createWriteStream")
+            console.time("createReadStream")
+            const stat = fs.statSync("temp.opus")
+            console.log("size of temp.opus: ", stat.size)
+            const readStream = fs.createReadStream("temp.opus")
+            console.timeEnd("createReadStream")
+            streamAudioToClient(readStream, clientSocket, { stat })
+          })
+          } catch(err) {console.log("Error in sendAsFile: ", err)}
+        }
+
+        const sendAsCombined = false
         if(sendAsCombined && decoded){
           try {
             const combinedData = new CombineData()
             decoded.pipe(combinedData)
             combinedData.on("finish", () => {
+              console.log("combinedData keys: ", Object.keys(combinedData))
+              emitToClient("total-length", combinedData.length)
               console.log("combinedData ended")
               if(clientSocket){
                 console.log("Sending data to client")
@@ -508,7 +562,12 @@ function playMusic(id, options) {
                 let timeDiff = endTime - startTime
                 console.log(`Time elapsed processing on server is ${timeDiff}ms`)
                 clientSocket.emit("time-elapsed", timeDiff)
-                clientSocket.emit("combined-data", combinedData)
+                let sendCombinedStream = true
+                if(sendCombinedStream){
+                  streamAudioToClient(combinedData, clientSocket)
+                } else {
+                  clientSocket.emit("combined-data", combinedData)
+                }
               }
             })} catch(err) { console.log("Error on sending combined data: ", err) }
         }
@@ -533,8 +592,9 @@ function playMusic(id, options) {
         console.log("No client found, playing audio straight to dispatcher");
       } */
 
-      const normalFlow = true;
-      if (normalFlow) {
+      const playAudioStream = serverSettings.audioStream.playAudioStream
+      if (playAudioStream) {
+        console.log("Dispatching audioStream to connection")
         dispatcher = connection.playStream(audioStream);
       }
       if(dispatcher) {
@@ -638,8 +698,6 @@ function skipSong() {
   if (stream) {
     stream.end();
   }
-  const shouldKillProcess = true
-  if(shouldKillProcess){killProcess()}
 }
 
 function commandSkip() {
