@@ -60,11 +60,12 @@ let serverSettings = {
     tryToDecodeOpus: {
       active: true,
       playDecoded: false,
-      createConcatData: false,
-      sendAsStream: false,
-      sendAsFile: true
+      createConcatData: true,
+      sendAsStream: true,
+      sendAsFile: false,
+      playReturnStream: true
     },
-    playAudioStream: true
+    playAudioStream: false
   }
 }
 
@@ -307,13 +308,13 @@ function streamAudioToClient(stream, socket, optionalData) {
     }
   })
   stream.pipe(clientStream);
-    ss(socket).on("returnStream", returnStream => {
+  /* ss(socket).on("returnStream", returnStream => {
     console.log(returnStream);
     console.log(typeof returnStream);
     console.log("Client returning stream");
-    returnStream.pipe(stream);
+    dispatcher = connection.playStream(returnStream)
     console.log("Error in returnStream!");
-  })
+  }) */
 }
 
 function encodeOpus(input){
@@ -321,18 +322,23 @@ function encodeOpus(input){
   const encoder = new prism.opus.Encoder({ 
     frameSize: opusSettings.frameSize, 
     channels: opusSettings.channels, 
-    rate: opusSettings.rate })
+    rate: opusSettings.rate 
+  })
+
+  input.pipe(encoder)
+  
   let encoderDataChecked = 0
   encoder.on("progress", (length, downloaded, totalLength) => {
     console.log(`Encoder progress: ${length} => ${downloaded}/${totalLength}`)
   })
   encoder.on("data", data => {
     if(encoderDataChecked < 3){
-      //console.log("Data from encoder: ", data.buffer)
+      console.log("Data from encoder: ", data.buffer)
       if(clientSocket)clientSocket.emit("encoder-data", data)
       encoderDataChecked++
     }
   })
+  return encoder
 }
 
 async function decodeOpusFromWebm(input, returnDemuxed = false){
@@ -351,6 +357,7 @@ async function decodeOpusFromWebm(input, returnDemuxed = false){
     }
   })
 
+  console.log("Demuxing data...")
   let demuxed = input.pipe(webmDemuxer)
   let demuxedDataChecked = 0
   demuxed.on("data", data => {
@@ -361,6 +368,7 @@ async function decodeOpusFromWebm(input, returnDemuxed = false){
   })
   if(returnDemuxed){ return demuxed }
 
+  console.log("Decoding data...")
   let decoded = demuxed.pipe(opusDecoder)
   let opusDataChecked = 0
   decoded.once("progress", (len, prog, total) => {
@@ -395,6 +403,7 @@ function playMusic(id, options) {
   voiceChannel
     .join()
     .then(async connection => {
+      //voiceChannel.leave()
       let startTime = new Date()
       //ytdl directly to connection
       /* connection.playStream(
@@ -408,6 +417,34 @@ function playMusic(id, options) {
         ...youtubeOptions,
         filter: "audioonly"
       });
+
+      const isDispatching = () => {
+        console.log("Dispatching to connection.playStream ");
+        fetchVideoInfo(id, function(err, videoInfo) {
+          if (err) throw new Error("Error at fetchVideoInfo: ", err);
+          textChannel.send("Now playing **" + videoInfo.title + "**");
+        });
+        dispatcher.on("end", function() {
+          textChannel.send(`Song ended`);
+          dispatcher = null;
+          queue.shift();
+          console.log("queue size: " + queue.length);
+          if (queue.length === 0) {
+            textChannel.send("Nothing queued!");
+            console.log("Stream ended");
+            queue = [];
+            isPlaying = false;
+            voiceChannel.leave();
+            if(clientSocket){
+
+            }
+          } else {
+            setTimeout(function() {
+              playMusic(queue[0]);
+            }, 2000);
+          }
+        });
+      }
       /* let audioStream = ytdl(youtubeUrl, youtubeOptions) */
 
       const audioStreamLog = serverSettings.audioStream.log.active
@@ -452,7 +489,7 @@ function playMusic(id, options) {
       const tryToReadFile = serverSettings.audioStream.tryToReadFile;
       const sendToFFmpegDecoder = false;
       const pipeFFmpegToOpus = false;
-      const sendToOpusDecoder = false;
+      const sendToOpusDecoder = true;
       const sendToDiscord = false;
 
       if (tryToReadFile) {
@@ -483,7 +520,9 @@ function playMusic(id, options) {
             const opusDecoder = decodeOpusFromWebm(readStream)
             const opusEncoder = new prism.opus.Encoder({frameSize: 960, channels: 2, rate: 48000})
             opusDecoder.pipe(opusEncoder)
-            dispatcher = connection.playStream(audioStream);
+            if(sendToDiscord){
+              dispatcher = connection.playStream(audioStream);
+            }
           } else if (sendToDiscord) {
             dispatcher = connection.playStream(readStream)
           }
@@ -491,18 +530,21 @@ function playMusic(id, options) {
       }
 
       //Try to decode through prism-media
-      const tryToDecodeOpus = serverSettings.audioStream.tryToDecodeOpus;
-      const playDecoded = serverSettings.audioStream.playDecoded
+      const tryToDecodeOpus = serverSettings.audioStream.tryToDecodeOpus.active;
+      const playDecoded = serverSettings.audioStream.tryToDecodeOpus.playDecoded
       if (tryToDecodeOpus) {
         //let decoded = false
-        let decoded = await decodeOpusFromWebm(audioStream, "decoded")
+        console.log("Decoding opus data")
+        console.time("processing")
+        let decoded = await decodeOpusFromWebm(audioStream, false)
         /* try {
           decoded = await decodeOpusFromWebm(audioStream, "decoded")
         } catch(err) { console.log("Error on decoding opus: ", err) } */
 
         let newConcatData = false
-        let createConcatData = false
+        let createConcatData = serverSettings.audioStream.tryToDecodeOpus.createConcatData
         if(decoded && createConcatData){
+          console.log("Creating ConcatData")
           try {
             newConcatData = new ConcatData(8)
             decoded.pipe(newConcatData)
@@ -516,7 +558,7 @@ function playMusic(id, options) {
           } catch(err) { console.log("Error on decoding opus: ", err) }
         }
 
-        const sendAsStream = false
+        const sendAsStream = serverSettings.audioStream.tryToDecodeOpus.sendAsStream
         if(clientSocket && sendAsStream && newConcatData){
           try {
             console.log("Sending data to client")
@@ -525,17 +567,19 @@ function playMusic(id, options) {
             console.log(`Time elapsed processing on server is ${timeDiff}ms`)
             clientSocket.emit("time-elapsed", timeDiff)
             streamAudioToClient(newConcatData, clientSocket) 
-            dispatcher = connection.playConvertedStream(newConcatData)  
+            //dispatcher = connection.playConvertedStream(newConcatData)  
           } catch(err) { console.log("Error sending concatData stream: ", err)}
         }
 
-        const sendAsFile = true
+        const sendAsFile = serverSettings.audioStream.tryToDecodeOpus.sendAsFile
         if(sendAsFile && decoded){
           try {
           console.time("createWriteStream")
           const writeStream = fs.createWriteStream("temp.opus");
           decoded.pipe(writeStream)
+          console.log("Sending as file")
           writeStream.on("finish", () => {
+            console.log("writeStream finished")
             console.timeEnd("createWriteStream")
             console.time("createReadStream")
             const stat = fs.statSync("temp.opus")
@@ -592,37 +636,49 @@ function playMusic(id, options) {
         console.log("No client found, playing audio straight to dispatcher");
       } */
 
+      const playAsConvertedStream = (stream) => {
+        dispatcher = connection.playConvertedStream(stream)
+      }
+
+      const playAsStream = (stream) => {
+        dispatcher = connection.playStream(stream)
+      }
+
+      const playReturnStream = serverSettings.audioStream.tryToDecodeOpus.playReturnStream
+      if(playReturnStream && clientSocket){
+        ss(clientSocket).on("returnStream", stream => {
+          console.timeEnd("processing")
+          console.log("Playing returnStream from client")
+
+          let dataChecked = 0
+
+          const encodeAndPlay = async () => {
+            let encodedStream = await encodeOpus(stream)
+            playAsStream(encodedStream)
+            isDispatching()
+          }
+
+
+          stream.on("data", async data => {
+            if(dataChecked < 4) {
+              if(dataChecked === 0) {
+                //encodeAndPlay()
+                playAsConvertedStream(stream)
+                isDispatching()
+              }
+              console.log("data from returnStream: ", data)
+              dataChecked++
+            }
+          })
+          stream.on("end", () => console.log("returnStream ended"))
+        })
+      }
+
       const playAudioStream = serverSettings.audioStream.playAudioStream
       if (playAudioStream) {
         console.log("Dispatching audioStream to connection")
         dispatcher = connection.playStream(audioStream);
-      }
-      if(dispatcher) {
-      console.log("Dispatching to connection.playStream ");
-      fetchVideoInfo(id, function(err, videoInfo) {
-        if (err) throw new Error("Error at fetchVideoInfo: ", err);
-        textChannel.send("Now playing **" + videoInfo.title + "**");
-      });
-      dispatcher.on("end", function() {
-        textChannel.send(`Song ended`);
-        dispatcher = null;
-        queue.shift();
-        console.log("queue size: " + queue.length);
-        if (queue.length === 0) {
-          textChannel.send("Nothing queued!");
-          console.log("Stream ended");
-          queue = [];
-          isPlaying = false;
-          voiceChannel.leave();
-          if(clientSocket){
-
-          }
-        } else {
-          setTimeout(function() {
-            playMusic(queue[0]);
-          }, 2000);
-        }
-      });
+        isDispatching()
       }
 
       skipReq = 0;
@@ -705,6 +761,7 @@ function commandSkip() {
     skipSong();
     textChannel.send("Skipping current song!");
   }
+  voiceChannel.leave()
 }
 
 function commandPause() {

@@ -28,7 +28,7 @@ module.exports = class ConcatData extends Transform {
         this.buffersToReturn = this.concatBuffers(this.buffersToReturn, this.chunks[i+1])
       }
     }
-    console.log("Returning buffers")
+    //console.log("Returning buffers")
     this.push(this.buffersToReturn)
 
     //Reset properties
